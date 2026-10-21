@@ -1,0 +1,136 @@
+#!/bin/sh
+# S9d — pultd-launch. POSIX sh, no bashisms.
+#
+# 1. read the saved node path from the state file
+# 2. if it is missing / not executable / too old (< 22) — re-resolve node via the
+#    login shell and the known candidate locations
+# 3. rewrite the state file
+# 4. exec node with the daemon entry
+#
+# Env knobs (for the spike harness; defaults are the real ones):
+#   PULT_HOME      default ~/.pult
+#   PULT_ENTRY     default $PULT_HOME/current/lib/node_modules/pult/bin/pultd.mjs
+#   PULT_MIN_NODE  default 22
+#   PULT_DRY_RUN=1 print the resolved node + entry instead of exec'ing
+
+set -u
+
+# Proven in test-launch.log.jsonl case S9d-9: a bad inherited PATH left the script
+# without `date`/`head`/`cat` ("date: command not found"). The launcher must
+# guarantee its own floor before it uses any external command.
+PATH="${PATH:-}:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+PULT_HOME="${PULT_HOME:-$HOME/.pult}"
+STATE="$PULT_HOME/node-path"
+MIN="${PULT_MIN_NODE:-22}"
+ENTRY="${PULT_ENTRY:-$PULT_HOME/current/lib/node_modules/pult/bin/pultd.mjs}"
+
+log() { printf '%s pultd-launch: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+# major version of $1, or empty if it is not a usable node
+node_major() {
+  _n="$1"
+  [ -n "$_n" ] || return 1
+  [ -x "$_n" ] || return 1
+  _v=$("$_n" -v 2>/dev/null) || return 1
+  case "$_v" in v[0-9]*) ;; *) return 1 ;; esac
+  _v=${_v#v}
+  printf '%s' "${_v%%.*}"
+}
+
+node_ok() {
+  _m=$(node_major "$1") || return 1
+  [ -n "$_m" ] || return 1
+  [ "$_m" -ge "$MIN" ] 2>/dev/null || return 1
+  return 0
+}
+
+# ---- 1. saved path --------------------------------------------------------
+SAVED=""
+if [ -r "$STATE" ]; then
+  SAVED=$(cat "$STATE" 2>/dev/null | head -n 1)
+fi
+
+NODE=""
+if [ -n "$SAVED" ] && node_ok "$SAVED"; then
+  NODE="$SAVED"
+  log "saved node ok: $NODE ($($NODE -v))"
+else
+  if [ -z "$SAVED" ]; then
+    log "no saved node path"
+  elif [ ! -x "$SAVED" ]; then
+    log "saved node path not executable: $SAVED"
+  else
+    log "saved node too old or unusable: $SAVED ($("$SAVED" -v 2>/dev/null || echo '?')), need >= $MIN"
+  fi
+fi
+
+# ---- 2. re-resolve --------------------------------------------------------
+if [ -z "$NODE" ]; then
+  # 2a. login shell (picks up nvm/fnm/mise/asdf shims that only exist in rc files)
+  SH="${SHELL:-/bin/sh}"
+  CAND=$("$SH" -ilc 'command -v node 2>/dev/null' 2>/dev/null | head -n 1)
+  if [ -n "$CAND" ] && node_ok "$CAND"; then
+    NODE="$CAND"
+    log "resolved via login shell: $NODE"
+  fi
+fi
+
+if [ -z "$NODE" ]; then
+  # 2b. known locations, most specific first
+  for c in \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    "$HOME/.volta/bin/node" \
+    "$HOME/.local/state/fnm_multishells"/*/bin/node \
+    "$HOME/.fnm/aliases/default/bin/node" \
+    "$HOME/.nvm/alias/default" \
+    "$HOME/.nvm/versions/node"/*/bin/node \
+    "$HOME/.asdf/shims/node" \
+    "$HOME/.local/share/mise/installs/node"/*/bin/node \
+    "$HOME/.local/bin/node" \
+    /usr/bin/node
+  do
+    [ -e "$c" ] || continue
+    if node_ok "$c"; then NODE="$c"; log "resolved via candidate list: $NODE"; break; fi
+  done
+fi
+
+# 2c. nvm keeps a bare version string in ~/.nvm/alias/default
+if [ -z "$NODE" ] && [ -r "$HOME/.nvm/alias/default" ]; then
+  _alias=$(cat "$HOME/.nvm/alias/default" 2>/dev/null | head -n 1)
+  _c="$HOME/.nvm/versions/node/v${_alias#v}/bin/node"
+  if node_ok "$_c"; then NODE="$_c"; log "resolved via nvm default alias: $NODE"; fi
+fi
+
+if [ -z "$NODE" ]; then
+  log "FATAL: no node >= $MIN found. Install one (brew install node) and run: pult doctor"
+  exit 78   # EX_CONFIG — a config problem, not a crash; KeepAlive still restarts, doctor explains
+fi
+
+# ---- 3. rewrite state -----------------------------------------------------
+if [ "$NODE" != "$SAVED" ]; then
+  mkdir -p "$PULT_HOME" 2>/dev/null || true
+  _tmp="$STATE.$$"
+  if printf '%s\n' "$NODE" > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$STATE" 2>/dev/null; then
+    log "state file rewritten: $STATE -> $NODE"
+  else
+    rm -f "$_tmp" 2>/dev/null || true
+    log "WARN: could not rewrite $STATE"
+  fi
+fi
+
+# ---- 4. exec --------------------------------------------------------------
+if [ "${PULT_DRY_RUN:-0}" = "1" ]; then
+  printf '{"node":"%s","nodeVersion":"%s","entry":"%s"}\n' "$NODE" "$("$NODE" -v)" "$ENTRY"
+  exit 0
+fi
+
+if [ ! -f "$ENTRY" ]; then
+  log "FATAL: daemon entry missing: $ENTRY"
+  exit 78
+fi
+
+log "exec $NODE $ENTRY"
+exec "$NODE" "$ENTRY" "$@"

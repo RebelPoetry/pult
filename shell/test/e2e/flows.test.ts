@@ -1,0 +1,398 @@
+// e2e ноги 2 (docs/12 §3, §5): окно как рабочий инструмент на фальшивых CLI. Завести агента
+// диалогом и получить ответ; разрешение из Inbox — «разрешить» (⌘Enter) и «отказать» с причиной;
+// «Стоп» посреди хода; закрыть окно посреди хода — ход дошёл, после открытия история на месте.
+
+import assert from 'node:assert/strict'
+import { after, before, describe, it } from 'node:test'
+import type { Page } from 'playwright-core'
+import { launch, waitFor } from './harness.js'
+import type { Harness } from './harness.js'
+
+type Client = Awaited<ReturnType<Harness['client']>>
+type Rec = { name: string; title?: string; lastStatus: string; model?: string; effort?: string }
+type Ev = { id: number; kind: string; sessionId: string; data: Record<string, unknown> }
+
+describe('окно: рабочие сценарии', () => {
+  let h: Harness
+  let c: Client
+
+  before(async () => {
+    h = await launch({ name: 'flows' })
+    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+    c = await h.client()
+  })
+  after(async () => {
+    // Гигиена: ни одного неотвеченного вопроса брокера после прогона.
+    if (c) {
+      const left = (await c.request('perm.list', {})) as { pending: Array<{ id: string }> }
+      for (const p of left.pending) await c.request('perm.resolve', { id: p.id, decision: 'deny', message: 'конец теста' })
+    }
+    await h?.close()
+  })
+
+  const list = async (): Promise<Rec[]> => ((await c.request('agent.list', {})) as { sessions: Rec[] }).sessions
+  const statusOf = async (name: string): Promise<string | undefined> => (await list()).find((r) => r.name === name)?.lastStatus
+  const journal = async (sessionId: string): Promise<Ev[]> =>
+    ((await c.request('events.tail', { since: 0, sessionId })) as { events: Ev[] }).events
+  const feedText = async (win: Page = h.win): Promise<string> => (await win.getByTestId('feed').textContent()) ?? ''
+  const select = async (name: string): Promise<void> => {
+    await h.win.locator(`[data-testid="agent-row"][data-agent="${name}"]`).click()
+    await h.win.locator(`[data-testid="conversation"][data-agent="${name}"]`).waitFor({ timeout: 10_000 })
+  }
+  const inboxCount = async (): Promise<string> => (await h.win.getByTestId('inbox-count').textContent()) ?? ''
+
+  it('⌘N → диалог: папка системным выбором, модель и усилие, первая реплика → ответ в ленте', async () => {
+    const dir = h.workDir('alpha', { scenario: 'simple' })
+    await h.stubPickFolder(dir)
+    await h.win.keyboard.press('Meta+N')
+    const dlg = h.win.getByTestId('new-agent-dialog')
+    await dlg.waitFor({ timeout: 5000 })
+    await dlg.getByTestId('pick-folder').click()
+    assert.ok(await waitFor(async () => (await dlg.getByTestId('new-agent-cwd').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
+    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'alpha', 'имя берётся из папки')
+    await dlg.getByRole('group', { name: 'Модель' }).getByRole('button', { name: 'haiku' }).click()
+    await dlg.getByRole('group', { name: 'Усилие' }).getByRole('button', { name: 'low' }).click()
+    await dlg.getByTestId('new-agent-prompt').fill('Скажи одно слово')
+    await dlg.getByTestId('new-agent-submit').click()
+    await dlg.waitFor({ state: 'detached', timeout: 10_000 })
+
+    await h.win.locator('[data-testid="conversation"][data-agent="alpha"]').waitFor({ timeout: 10_000 })
+    assert.ok(await waitFor(async () => (await feedText()).includes('PULT'), 15_000), 'ответ модели не появился в ленте')
+    assert.match(await feedText(), /Скажи одно слово/)
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-status').textContent()) === 'готов', 10_000))
+    const rec = (await list()).find((r) => r.name === 'alpha')
+    assert.deepEqual([rec?.model, rec?.effort], ['haiku', 'low'])
+    // Контекстное окно в шапке разговора: фикстура 01 — 23 392 токена подсказки из окна 200 000.
+    const ctx = async (): Promise<string | null> => h.win.getByTestId('conv-context').textContent({ timeout: 500 }).catch(() => null)
+    assert.ok(await waitFor(async () => (await ctx()) === 'контекст 23k / 200k · 12%', 10_000), `индикатор контекста: ${await ctx()}`)
+  })
+
+  it('реплика из поля ввода: Enter отправляет, Shift+Enter — новая строка', async () => {
+    const box = h.win.getByTestId('composer')
+    await box.fill('первая строка')
+    await box.press('Shift+Enter')
+    await box.pressSequentially('вторая')
+    assert.equal(await box.inputValue(), 'первая строка\nвторая')
+    await box.press('Enter')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('msg-user').count()) === 2, 10_000), 'вторая реплика не ушла')
+    assert.ok(await waitFor(async () => (await statusOf('alpha')) === 'idle', 15_000))
+    const users = (await journal('alpha')).filter((e) => e.kind === 'message.user').map((e) => e.data['text'])
+    assert.deepEqual(users, ['Скажи одно слово', 'первая строка\nвторая'])
+  })
+
+  it('⌘V на файлах из Finder кладёт в поле полные пути всех файлов, а не имя первого', async () => {
+    // Chromium отдаёт в paste тип `Files` и только первый файл; все пути main читает из буфера.
+    await h.app.evaluate((_e, paths) => { (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths = paths },
+      ['/srv/p/Отчёт 1.txt', '/tmp/b.txt'])
+    const box = h.win.getByTestId('composer')
+    await box.fill('глянь ')
+    await box.evaluate((el) => {
+      const dt = new DataTransfer()
+      dt.items.add(new File(['x'], 'Отчёт 1.txt', { type: 'text/plain' }))
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+    })
+    assert.ok(await waitFor(async () => (await box.inputValue()) === "глянь '/srv/p/Отчёт 1.txt' /tmp/b.txt", 3000), `в поле: ${await box.inputValue()}`)
+    await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths })
+    await box.fill('')
+  })
+
+  it('разрешение из Inbox: ⌘Enter разрешает выделенный запрос, ход доходит до конца', async () => {
+    const dir = h.workDir('beta', { scenario: 'demo-edit' })
+    await c.request('agent.start', { name: 'beta', kind: 'claude', cwd: dir })
+    await c.request('agent.prompt', { name: 'beta', text: 'Поправь округление' })
+    assert.ok(await waitFor(async () => (await inboxCount()) === '1', 15_000), 'запрос не дошёл до Inbox')
+    const card = h.win.getByTestId('inbox').getByTestId('perm-card')
+    await card.waitFor({ timeout: 5000 })
+    assert.match((await card.textContent()) ?? '', /Правка файла.*beta/)
+    assert.match((await card.textContent()) ?? '', /Math\.floor/, 'дифф правки виден в карточке')
+    // Строка ждущей сессии подсвечена (в своём проекте она первая). Ждём: карточка приходит событием
+    // сразу, а строку окно берёт из `agent.list` с задержкой 150 мс.
+    const betaRow = h.win.locator('[data-testid="agent-row"][data-agent="beta"]')
+    assert.ok(await waitFor(async () => (await betaRow.getAttribute('data-needs')) === '1', 5000), 'строка beta не подсвечена как ждущая')
+
+    await h.win.keyboard.press('Meta+Enter')
+    assert.ok(await waitFor(async () => (await inboxCount()) === '0', 10_000), 'Inbox не опустел')
+    assert.ok(await waitFor(async () => (await statusOf('beta')) === 'idle', 15_000))
+    const resolved = (await journal('beta')).filter((e) => e.kind === 'permission.resolved')
+    assert.deepEqual(resolved.map((e) => [e.data['decision'], e.data['by'], e.data['scope']]), [['allow', 'human', 'once']])
+    await select('beta')
+    assert.ok(await waitFor(async () => (await feedText()).includes('99 %'), 10_000), 'ход после разрешения не дошёл до ленты')
+    assert.match(await feedText(), /Разрешено/)
+  })
+
+  it('M8d: Codex предложил «всегда» — кнопка с префиксом команды; ⌘Enter всё равно ОДИН раз, кнопка — правилом', async () => {
+    // Фикстура 03 (живой codex): availableDecisions = accept, {acceptWithExecpolicyAmendment}, cancel — «на сессию» нет.
+    h.codexConfig({ speed: 0, scenarioByDir: { 'cx-perm': 'permission-accept' } })
+    await c.request('agent.start', { name: 'cxperm', kind: 'codex', cwd: h.workDir('cx-perm') })
+    const ask = async (): Promise<void> => {
+      await c.request('agent.prompt', { name: 'cxperm', text: 'Запиши hi в x.txt' })
+      assert.ok(await waitFor(async () => (await inboxCount()) === '1', 15_000), 'запрос codex не дошёл до Inbox')
+    }
+    const settled = async (): Promise<Ev[]> => {
+      assert.ok(await waitFor(async () => (await inboxCount()) === '0', 10_000), 'Inbox не опустел')
+      assert.ok(await waitFor(async () => (await statusOf('cxperm')) === 'idle', 15_000))
+      return (await journal('cxperm')).filter((e) => e.kind === 'permission.resolved')
+    }
+    await ask()
+    const card = h.win.getByTestId('inbox').getByTestId('perm-card')
+    const rule = card.getByTestId('perm-approve-rule')
+    await rule.waitFor({ timeout: 5000 })
+    assert.match((await rule.textContent()) ?? '', /Всегда: команды, начинающиеся с.*echo hi > x\.txt/)
+    assert.equal(await card.getByTestId('perm-approve-session').count(), 0, '«в этой сессии» сервер не предлагал')
+    await h.win.keyboard.press('Meta+Enter')
+    assert.deepEqual((await settled()).map((e) => e.data['scope']), ['once'], '⌘Enter — всегда один раз')
+
+    await ask()
+    await h.win.getByTestId('inbox').getByTestId('perm-approve-rule').click()
+    const both = await settled()
+    assert.deepEqual(both.map((e) => e.data['scope']), ['once', 'rule'])
+    assert.deepEqual(both[1]?.data['rule'], { kind: 'execpolicy', label: "/bin/zsh -lc 'echo hi > x.txt'" })
+    // Лишняя папка в дереве удлиняет его, и меню архива в тесте ниже закрывается прокруткой — убираем за собой.
+    await c.request('agent.rm', { name: 'cxperm' })
+  })
+
+  it('M8d: «Убрать из списка…» у папки с сессиями — вопрос, сессии в архив, папка пропадает; новая сессия её возвращает', async () => {
+    const dir = h.workDir('hideme', { scenario: 'simple' })
+    await c.request('agent.start', { name: 'hideme', kind: 'claude', cwd: dir })
+    const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
+    await proj.waitFor({ timeout: 10_000 })
+    await proj.hover()
+    await proj.getByTestId('project-menu').click()
+    await h.win.getByTestId('project-menu-list').getByTestId('project-hide').click()
+    const dlg = h.win.getByTestId('confirm-hide')
+    await dlg.waitFor({ timeout: 5000 })
+    assert.match((await dlg.textContent()) ?? '', /1 сессия уйдёт в архив.*папка на диске не трогается/)
+    await dlg.getByTestId('confirm-ok').click()
+    await proj.waitFor({ state: 'detached', timeout: 10_000 })
+    const rec = ((await c.request('agent.list', {})) as { sessions: Array<{ name: string; archived?: boolean }> }).sessions.find((r) => r.name === 'hideme')
+    assert.equal(rec?.archived, true)
+    await c.request('agent.start', { name: 'hideme2', kind: 'claude', cwd: dir })
+    await proj.waitFor({ timeout: 10_000 })
+    await c.request('agent.rm', { name: 'hideme2' })
+    await c.request('agent.rm', { name: 'hideme' })
+  })
+
+  it('отказ с причиной из Inbox: причина уходит агенту, ход доигрывается веткой отказа', async () => {
+    await c.request('agent.prompt', { name: 'beta', text: 'Ещё раз, но аккуратнее' })
+    assert.ok(await waitFor(async () => (await inboxCount()) === '1', 15_000))
+    const card = h.win.getByTestId('inbox').getByTestId('perm-card')
+    await card.getByTestId('perm-deny').click()
+    await card.getByTestId('perm-reason').fill('сначала тест')
+    await card.getByTestId('perm-deny-confirm').click()
+    assert.ok(await waitFor(async () => (await inboxCount()) === '0', 10_000))
+    assert.ok(await waitFor(async () => (await statusOf('beta')) === 'idle', 15_000))
+    const last = (await journal('beta')).filter((e) => e.kind === 'permission.resolved').at(-1)
+    assert.deepEqual([last?.data['decision'], last?.data['message']], ['deny', 'сначала тест'])
+    assert.ok(await waitFor(async () => (await feedText()).includes('правку не вношу'), 10_000))
+    assert.match(await feedText(), /Отказано.*сначала тест/)
+  })
+
+  it('«Стоп» посреди хода: Esc → подтверждение → ход прерван, в ленте причина', async () => {
+    const dir = h.workDir('gamma', { scenario: 'simple', hangAfterInit: 30_000 })
+    await c.request('agent.start', { name: 'gamma', kind: 'claude', cwd: dir })
+    await c.request('agent.prompt', { name: 'gamma', text: 'Долгая задача' })
+    await select('gamma')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-status').textContent()) === 'идёт', 10_000),
+      `статус в окне: ${await h.win.getByTestId('conv-status').textContent()}, в демоне: ${await statusOf('gamma')}; лента: ${await feedText()}; журнал: ${(await journal('gamma')).map((e) => (e.kind === 'status.changed' ? `${e.kind}:${String(e.data['status'])}` : e.kind)).join(' ')}`)
+    await h.win.getByTestId('stop-turn').waitFor({ timeout: 5000 })
+    await h.win.keyboard.press('Escape')
+    await h.win.getByTestId('confirm-stop').waitFor({ timeout: 5000 })
+    await h.win.getByTestId('confirm-ok').click()
+    assert.ok(await waitFor(async () => (await statusOf('gamma')) === 'interrupted', 10_000), 'ход не прервался')
+    assert.ok(await waitFor(async () => (await feedText()).includes('Ход остановлен'), 5000))
+    assert.equal(await h.win.getByTestId('stop-turn').count(), 0, 'кнопка «Стоп» ушла вместе с ходом')
+  })
+
+  it('очередь реплик (О2): Enter во время хода — в очередь и уходит сама; ⌘Enter — прервать и сказать', async () => {
+    const dir = h.workDir('zeta', { scenario: 'simple', speed: 0, hang: 1500 })
+    await c.request('agent.start', { name: 'zeta', kind: 'claude', cwd: dir })
+    await c.request('agent.prompt', { name: 'zeta', text: 'Первая' })
+    await select('zeta')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-status').textContent()) === 'идёт', 10_000))
+    const box = h.win.getByTestId('composer')
+    const users = async (): Promise<unknown[]> => (await journal('zeta')).filter((e) => e.kind === 'message.user').map((e) => e.data['text'])
+    await box.fill('Вторая')
+    await box.press('Enter')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('queue-item').count()) === 1, 5000), 'реплика не встала в очередь под полем')
+    assert.match((await h.win.getByTestId('queue-item').textContent()) ?? '', /Вторая/)
+    assert.equal(await box.inputValue(), '', 'поле очищено')
+    assert.ok(await waitFor(async () => (await users()).includes('Вторая'), 15_000), 'реплика из очереди не ушла сама')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('queue-item').count()) === 0, 10_000), 'очередь под полем не опустела')
+
+    // Идёт ход «Вторая»: ⌘Enter — стоп и сразу «Вместо», без вопроса и без «разрешить запрос».
+    assert.ok(await waitFor(async () => (await statusOf('zeta')) === 'working', 10_000))
+    await box.fill('Вместо')
+    await box.press('Meta+Enter')
+    assert.ok(await waitFor(async () => (await users()).includes('Вместо'), 15_000), '«прервать и сказать» не отправило реплику')
+    const kinds = (await journal('zeta')).filter((e) => e.kind === 'status.changed').map((e) => e.data['status'])
+    assert.ok(kinds.includes('interrupted'), `ход не прерван: ${kinds.join(' ')}`)
+    assert.deepEqual(await users(), ['Первая', 'Вторая', 'Вместо'])
+    assert.ok(await waitFor(async () => (await statusOf('zeta')) === 'idle', 15_000))
+  })
+
+  it('название агента: правка в шапке посреди хода, Esc бросает правку (а не зовёт «Стоп»), пустое — снять', async () => {
+    const dir = h.workDir('eps', { scenario: 'simple', hangAfterInit: 30_000 })
+    await c.request('agent.start', { name: 'eps', kind: 'claude', cwd: dir })
+    await c.request('agent.prompt', { name: 'eps', text: 'Долгая задача' })
+    await select('eps')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-status').textContent()) === 'идёт', 10_000))
+    const title = h.win.getByTestId('conv-title')
+    const input = h.win.getByTestId('rename-input')
+    const titleOf = async (): Promise<string | undefined> => (await list()).find((r) => r.name === 'eps')?.title
+    assert.equal(await title.textContent(), 'eps')
+
+    await h.win.getByTestId('rename-agent').click()
+    assert.equal(await input.inputValue(), 'eps', 'правка начинается с того, что написано в шапке')
+    await input.fill('Починить округление')
+    // ⌘Enter — горячая клавиша окна, не «сохранить название»: правка остаётся открытой.
+    await input.press('Meta+Enter')
+    assert.equal(await input.count(), 1)
+    assert.equal(await titleOf(), undefined)
+    await input.press('Enter')
+    assert.ok(await waitFor(async () => (await title.count()) === 1 && (await title.textContent()) === 'Починить округление', 5000), 'название не сменилось')
+    assert.ok(await waitFor(async () => h.win.evaluate(() => document.activeElement?.getAttribute('data-testid') === 'composer'), 2000), 'после Enter фокус не вернулся в поле реплики')
+    assert.equal(await titleOf(), 'Починить округление')
+    assert.equal(await h.win.locator('[data-testid="agent-row"][data-agent="eps"] .ag-name').textContent(), 'Починить округление')
+    // Имя — ключ для демона и CLI — не тронуто и остаётся на виду; ход идёт как шёл.
+    assert.equal(await h.win.getByTestId('conv-name').textContent(), 'eps')
+    assert.equal(await statusOf('eps'), 'working')
+
+    // Esc в поле названия: правка брошена, окно «Остановить ход?» НЕ открылось (ход идёт).
+    await title.dblclick()
+    await input.fill('это не сохранится')
+    await input.press('Escape')
+    await input.waitFor({ state: 'detached', timeout: 3000 })
+    assert.equal(await h.win.getByTestId('confirm-stop').count(), 0, 'Esc из поля названия дошёл до «Стоп»')
+    assert.equal(await title.textContent(), 'Починить округление')
+    assert.equal(await titleOf(), 'Починить округление')
+
+    // Уход фокуса сохраняет (щёлкнул мимо — не потерял набранное) и фокус у человека не отбирает.
+    await title.dblclick()
+    await input.fill('Округление вниз')
+    await h.win.getByTestId('feed').click()
+    assert.ok(await waitFor(async () => (await titleOf()) === 'Округление вниз', 5000), 'уход фокуса не сохранил название')
+    assert.equal(await h.win.getByTestId('confirm-stop').count(), 0)
+
+    // Названия не уникальны — в «Остановить ход?» рядом с названием стоит имя.
+    await h.win.keyboard.press('Escape')
+    const stop = h.win.getByTestId('confirm-stop')
+    await stop.waitFor({ timeout: 3000 })
+    assert.match((await stop.textContent()) ?? '', /Округление вниз \(eps\)/)
+    await h.win.keyboard.press('Escape')
+    await stop.waitFor({ state: 'detached', timeout: 3000 })
+
+    // Стёр название — оно снято: в шапке и списке снова имя.
+    await h.win.getByTestId('rename-agent').click()
+    await input.fill('')
+    await input.press('Enter')
+    assert.ok(await waitFor(async () => (await title.count()) === 1 && (await title.textContent()) === 'eps', 5000), 'название не снялось')
+    assert.equal(await titleOf(), undefined)
+    assert.equal(await h.win.getByTestId('conv-name').count(), 0)
+    await c.request('agent.stop', { name: 'eps' })
+    assert.ok(await waitFor(async () => (await statusOf('eps')) === 'interrupted', 10_000))
+  })
+
+  it('горячие клавиши: ⌘I прячет и показывает Inbox, ⌘1…9 переключают вкладки сессий', async () => {
+    assert.equal(await h.win.getByTestId('inbox').count(), 1)
+    await h.win.keyboard.press('Meta+I')
+    await h.win.getByTestId('inbox').waitFor({ state: 'detached', timeout: 3000 })
+    await h.win.keyboard.press('Meta+I')
+    await h.win.getByTestId('inbox').waitFor({ timeout: 3000 })
+    const second = await h.win.getByTestId('session-tab').nth(1).getAttribute('data-agent')
+    assert.ok(second, 'вкладок меньше двух')
+    await h.win.keyboard.press('Meta+2')
+    await h.win.locator(`[data-testid="conversation"][data-agent="${second}"]`).waitFor({ timeout: 3000 })
+  })
+
+  it('справка по клавишам: ⌘/ и «?» в подвале открывают, Esc закрывает', async () => {
+    await h.win.keyboard.press('Meta+Slash')
+    const help = h.win.getByTestId('hotkeys-help')
+    await help.waitFor({ timeout: 3000 })
+    assert.match((await help.textContent()) ?? '', /Shift\+Enter/)
+    await h.win.keyboard.press('Escape')
+    await help.waitFor({ state: 'detached', timeout: 3000 })
+    await h.win.getByTestId('hotkeys-open').click()
+    await help.waitFor({ timeout: 3000 })
+    await h.win.keyboard.press('Escape')
+    await help.waitFor({ state: 'detached', timeout: 3000 })
+  })
+
+  it('проекты: папка «+» → проект в дереве; «+» на проекте заводит сессию в его папке; вкладка закрывается, сессия остаётся', async () => {
+    const dir = h.workDir('proj', { scenario: 'simple' })
+    await h.stubPickFolder(dir)
+    await h.win.getByTestId('add-project').click()
+    const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
+    await proj.waitFor({ timeout: 5000 })
+    assert.equal(await proj.getAttribute('data-pinned'), '1')
+    await proj.hover()
+    await proj.getByTestId('project-new-session').click()
+    const dlg = h.win.getByTestId('new-agent-dialog')
+    await dlg.waitFor({ timeout: 5000 })
+    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), dir, 'папка проекта не подставилась')
+    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'proj')
+    await dlg.getByTestId('new-agent-submit').click()
+    await dlg.waitFor({ state: 'detached', timeout: 10_000 })
+    await proj.locator('[data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 10_000 })
+    const tab = h.win.locator('[data-testid="session-tab"][data-agent="proj"]')
+    assert.equal(await tab.getAttribute('aria-selected'), 'true', 'новая сессия открылась активной вкладкой')
+    await tab.getByTestId('tab-close').click()
+    await tab.waitFor({ state: 'detached', timeout: 3000 })
+    assert.equal(await proj.locator('[data-testid="agent-row"][data-agent="proj"]').count(), 1, 'закрыть вкладку ≠ удалить сессию')
+    // Убрать проект из списка (меню «⋯» проекта) — сессия не теряется: её папка становится неявным проектом.
+    await proj.hover()
+    await proj.getByTestId('project-menu').click()
+    await h.win.getByTestId('project-menu-list').getByTestId('project-unpin').click()
+    assert.ok(await waitFor(async () => (await proj.getAttribute('data-pinned')) === '0', 5000), 'проект не открепился')
+    assert.equal(await proj.locator('[data-testid="agent-row"][data-agent="proj"]').count(), 1)
+  })
+
+  it('меню сессии: правый клик → переименовать; «В архив» прячет в «Архив», «Вернуть» возвращает; Esc закрывает меню', async () => {
+    const row = (): ReturnType<typeof h.win.locator> => h.win.locator('[data-testid="agent-row"][data-agent="proj"]')
+    await row().click({ button: 'right' })
+    const menu = h.win.getByTestId('session-menu-list')
+    await menu.waitFor({ timeout: 3000 })
+    await h.win.keyboard.press('Escape')
+    await menu.waitFor({ state: 'detached', timeout: 3000 })
+
+    await row().click({ button: 'right' })
+    await menu.getByTestId('row-rename').click()
+    const dlg = h.win.getByTestId('rename-dialog')
+    await dlg.waitFor({ timeout: 3000 })
+    await dlg.getByTestId('rename-dialog-input').fill('Проект из меню')
+    await dlg.getByTestId('rename-dialog-input').press('Enter')
+    await dlg.waitFor({ state: 'detached', timeout: 5000 })
+    assert.ok(await waitFor(async () => ((await row().locator('.ag-name').textContent()) ?? '') === 'Проект из меню', 8000), 'название не сменилось')
+
+    await row().hover()
+    await row().getByTestId('row-menu').click()
+    await menu.getByTestId('row-archive').click()
+    const archive = h.win.getByTestId('archive-section')
+    await archive.waitFor({ timeout: 8000 })
+    assert.equal(await h.win.locator('[data-testid="project"] [data-testid="agent-row"][data-agent="proj"]').count(), 0, 'архивная сессия осталась в проекте')
+    await archive.locator('.proj-h').click()
+    await archive.locator('[data-testid="agent-row"][data-agent="proj"]').click({ button: 'right' })
+    await menu.getByTestId('row-unarchive').click()
+    await archive.waitFor({ state: 'detached', timeout: 8000 })
+    await h.win.locator('[data-testid="project"] [data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 5000 })
+  })
+
+  it('закрыть окно посреди хода: ход дошёл без окна, после открытия история на месте', async () => {
+    const dir = h.workDir('delta', { scenario: 'simple', hang: 2500 })
+    await c.request('agent.start', { name: 'delta', kind: 'claude', cwd: dir })
+    await select('delta')
+    const box = h.win.getByTestId('composer')
+    await box.fill('Реплика перед закрытием окна')
+    await box.press('Enter')
+    assert.ok(await waitFor(async () => (await statusOf('delta')) === 'working', 10_000))
+
+    // Окно закрыто — демон и агент живут дальше: ход доходит до конца без окна.
+    const win = await h.reopen(async () => {
+      assert.ok(await waitFor(async () => (await statusOf('delta')) === 'idle', 15_000), 'ход не дошёл без окна')
+    })
+    assert.ok(await waitFor(async () => (await win.getAttribute('.app', 'data-conn')) === 'up', 20_000))
+    await win.locator('[data-testid="agent-row"][data-agent="delta"]').click()
+    assert.ok(await waitFor(async () => (await feedText(win)).includes('PULT'), 10_000), 'ответ не восстановился после открытия')
+    assert.match(await feedText(win), /Реплика перед закрытием окна/)
+    await h.shot('reopened')
+  })
+})

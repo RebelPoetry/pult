@@ -1,0 +1,10 @@
+{
+  "name": "pult-playwright-mcp",
+  "version": "0.0.83",
+  "private": true,
+  "description": "Браузер для агента Пульта: прибитый @playwright/mcp и его зависимости (ставится npm ci по package-lock.json, src/mcp/browser.ts)",
+  "license": "MIT",
+  "dependencies": {
+    "@playwright/mcp": "0.0.83"
+  }
+}

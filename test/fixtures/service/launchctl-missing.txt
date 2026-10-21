@@ -1,0 +1,10 @@
+## print missing
+Bad request.
+Could not find service "dev.pult.acc" in domain for user gui: 502
+exit=113
+## bootout missing
+Boot-out failed: 3: No such process
+exit=3
+## kickstart missing
+Could not find service "dev.pult.acc" in domain for user gui: 502
+exit=113

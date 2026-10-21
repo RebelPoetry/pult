@@ -1,0 +1,44 @@
+.DS_Store
+node_modules/
+
+# Одноразовые песочницы спайка — вложенные git-репозитории, создаются заново за секунду
+spike/sandbox-a/
+spike/sandbox-b/
+
+# Артефакты теста установки и отката (spike/env): фальшивый ~/.pult и кэш npm
+spike/env/fakehome/
+spike/env/npm-cache/
+
+# Схема протокола Codex, по папке на версию CLI. Храним только сводные файлы версии: после обновления codex старую
+# схему уже не сгенерировать, а она нужна для сверки «протокол изменился» (scripts/diff-codex-schema.mjs).
+# По-типовые файлы (300+) восстанавливаются командой, пока бинарь этой версии жив:
+#   codex app-server generate-json-schema --out spike/codex/schema/<версия>/plain
+#   codex app-server generate-json-schema --experimental --out spike/codex/schema/<версия>/experimental
+spike/codex/schema/*/*/*
+!spike/codex/schema/*/*/codex_app_server_protocol.schemas.json
+!spike/codex/schema/*/*/codex_app_server_protocol.v2.schemas.json
+
+# Сборка пакета и тестов: и то и другое восстанавливается из исходников `npm run build`.
+dist/
+dist-test/
+
+# Интерфейс окна (Ф2): юнит-тесты интерфейса собираются esbuild из ui/test/.
+dist-ui-test/
+# Оболочка Electron (shell/): сборка, тесты, артефакты e2e (скриншоты), упакованное приложение.
+shell/dist/
+shell/dist-test/
+shell/test-results/
+shell/out/
+
+# Тарболы `npm pack` в корне (ручная сборка пакета для `pult update --from`): артефакт, восстанавливается из исходников.
+/pult-*.tgz
+
+# Сборка релиза (scripts/release.mjs, M8c): тарбол, Pult.app в zip, подписанный latest.json — на GitHub, не в git.
+release/
+
+# Выход прогонов спайка (журналы и таблицы вердиктов): пишется заново при каждом прогоне ноги и в публичное
+# дерево не входит (scripts/public-exclude.txt, M9). Уже закоммиченные файлы этим правилом не затронуты.
+spike/*/logs/
+spike/*/results.json
+spike/env/*.log.jsonl
+spike/env/*.err.txt

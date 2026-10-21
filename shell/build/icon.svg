@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Иконка Pult.app: плитка в акценте страницы v0.6 (#2456D6), на ней пульт — три фейдера
+       в цветах провайдеров (Claude — янтарь, Codex — бирюза, opencode — фиолет). Без чужих знаков.
+       Сетка macOS: плитка 824×824 с отступом 100, тень внутри холста 1024. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A6BEA"/>
+      <stop offset="1" stop-color="#1B45B4"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.06"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#0B1E4F" flood-opacity="0.35"/>
+    </filter>
+    <filter id="knob" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#0B1E4F" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="4"/>
+  <!-- лицевая панель пульта -->
+  <rect x="222" y="232" width="580" height="560" rx="64" fill="url(#face)" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="4"/>
+  <!-- дорожки фейдеров -->
+  <g fill="#0E2466" fill-opacity="0.55">
+    <rect x="337" y="300" width="26" height="424" rx="13"/>
+    <rect x="499" y="300" width="26" height="424" rx="13"/>
+    <rect x="661" y="300" width="26" height="424" rx="13"/>
+  </g>
+  <!-- риски шкалы -->
+  <g stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="6" stroke-linecap="round">
+    <line x1="398" y1="340" x2="430" y2="340"/><line x1="398" y1="425" x2="422" y2="425"/>
+    <line x1="398" y1="512" x2="430" y2="512"/><line x1="398" y1="599" x2="422" y2="599"/>
+    <line x1="398" y1="684" x2="430" y2="684"/>
+    <line x1="560" y1="340" x2="592" y2="340"/><line x1="560" y1="425" x2="584" y2="425"/>
+    <line x1="560" y1="512" x2="592" y2="512"/><line x1="560" y1="599" x2="584" y2="599"/>
+    <line x1="560" y1="684" x2="592" y2="684"/>
+  </g>
+  <!-- ручки фейдеров: янтарь, бирюза, фиолет -->
+  <g filter="url(#knob)" stroke="#FFFFFF" stroke-width="10">
+    <rect x="290" y="560" width="120" height="76" rx="22" fill="#E3A04A"/>
+    <rect x="452" y="364" width="120" height="76" rx="22" fill="#4CC2B7"/>
+    <rect x="614" y="480" width="120" height="76" rx="22" fill="#B9A2F5"/>
+  </g>
+  <g stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="8" stroke-linecap="round">
+    <line x1="322" y1="598" x2="378" y2="598"/>
+    <line x1="484" y1="402" x2="540" y2="402"/>
+    <line x1="646" y1="518" x2="702" y2="518"/>
+  </g>
+</svg>

@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Проверка ничего не публикует и никуда не пишет — только читает дерево.
+permissions:
+  contents: read
+
+# Новый пуш в ту же ветку отменяет предыдущий прогон: платить за устаревший смысла нет.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ПОЧЕМУ отдельная работа вместо `paths:` на уровне workflow: `paths:` отменил бы весь
+  # прогон целиком, а нам нужно, чтобы ubuntu шёл ВСЕГДА, а macos — только когда он что-то
+  # решает. Причина денежная: на приватном репозитории Free-плана минуты macOS списываются
+  # с коэффициентом 10x (1 минута macOS = 10 минут из квоты), ubuntu — 1x. Поэтому macOS
+  # включается только там, где он единственный, кто может проверить: файлы службы launchd,
+  # сами скрипты проверки и сам workflow — плюс всегда на push в main.
+  #
+  # ГРАБЛИ на будущее: раз матрица переменная, работа `check (macos-latest)` в PR, который
+  # трогает только docs/, вообще не создаётся. Требовать её по имени в branch protection
+  # нельзя — такой PR будет вечно висеть в «Expected». Когда branch protection появится
+  # (сейчас её нет: Free-план не даёт её приватным репозиториям), требовать надо одну
+  # сводную работу с `needs: [changes, check]` и `if: always()`, а не ногу матрицы по имени.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      e2e: ${{ steps.pick.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          mac=0
+          e2e=0
+          if [ "$EVENT" != "pull_request" ]; then
+            mac=1                       # push в main: гоняем обе ноги
+            e2e=1
+          else
+            changed=$(git diff --name-only "$BASE_SHA" HEAD)
+            printf 'изменённые файлы:\n%s\n' "$changed"
+            # Код пакета (src/, test/, манифест, tsconfig) — тоже на macOS: locate.ts,
+            # doctor.ts и net.ts полны маковских путей (/opt/homebrew, ChatGPT.app, launchd),
+            # и основная машина владельца — macOS. Без этой строки весь В2–В5, который трогает
+            # только src/ и test/, вечно проверялся бы одной ubuntu.
+            case "$changed" in
+              *service/*|*scripts/*|*.github/*|*install.sh*) mac=1 ;;   # service/ — и спайковый, и продуктовый лаунчер; install.sh — /bin/sh macOS
+              *src/*|*test/*|*package.json|*package-lock.json|*tsconfig*.json) mac=1 ;;
+            esac
+            # Окно (Ф2): e2e Electron — только на macOS и только когда менялось то, что окно
+            # исполняет: интерфейс, оболочка или код демона/протокола. Каждая строка diff — путь,
+            # поэтому ищем по началу строки, а не подстрокой (docs/src/… не должен включать e2e).
+            if printf '%s\n' "$changed" | grep -Eq '^(ui|shell|src)/'; then
+              mac=1
+              e2e=1
+            fi
+          fi
+          if [ "$mac" -eq 1 ]; then
+            matrix='["ubuntu-latest","macos-latest"]'
+          else
+            matrix='["ubuntu-latest"]'
+          fi
+          echo "нога macos: $mac, e2e окна: $e2e"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: changes
+    runs-on: ${{ matrix.os }}
+    # e2e окна на macOS докачивает Electron (~100 МБ) и поднимает его дважды — отсюда запас.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # cache не включаем намеренно: у пакета две devDependencies (typescript и
+          # @types/node), `npm ci` ставит их за считанные секунды, а кеш пришлось бы
+          # инвалидировать и хранить ради этих секунд.
+      # Ровно та же команда, которую человек запускает у себя локально. PULT_E2E решает только,
+      # гонять ли e2e окна: на ubuntu — никогда, на macos — когда менялись ui/, shell/ или src/.
+      - run: ./scripts/ci-check.sh
+        env:
+          PULT_E2E: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.e2e == '1' && '1' || '0' }}

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.pult.daemon</string>
+
+	<!-- Never `node` directly: the saved node path dies when brew/nvm/volta move.
+	     pultd-launch re-resolves it and rewrites the state file. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/you/src/pult/spike/env/service/pultd-launch</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart only on a non-zero exit: a clean `pult daemon stop` must stay stopped. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- Backoff floor. launchd already throttles to 10 s; spelled out so it is visible. -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>/Users/you/src/pult/spike/env/service/logs/pultd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/you/src/pult/spike/env/service/logs/pultd.log</string>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/you</string>
+
+	<!-- A gui/ agent gets PATH=/usr/bin:/bin:/usr/sbin:/sbin and nothing else.
+	     Measured (locate-cli.log.jsonl): claude, codex, opencode, gh, node, npm are all
+	     absent from that PATH. This list is the bootstrap so pultd-launch can find `node`
+	     and `$SHELL`; the real CLI paths still come from the locator, not from here. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/Users/you/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>PULT_HOME</key>
+		<string>/Users/you/src/pult/spike/env/fakehome/.pult</string>
+	</dict>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

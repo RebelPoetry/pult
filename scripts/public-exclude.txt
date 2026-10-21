@@ -1,0 +1,39 @@
+# public-exclude.txt — what scripts/public-tree.mjs leaves OUT of the public tree (M9, docs/DEV.md «M9: публичное дерево»).
+#
+# Syntax: gitignore-style globs over `git ls-files` paths, one per line. `*` stays inside one path segment,
+# `**` spans segments, a pattern without `/` matches a basename anywhere, a trailing `/` means «everything under
+# this directory», `!` re-includes. Last matching line wins. Blank lines and `#` comments are ignored.
+#
+# Rule of thumb (owner decision 20.10.2026): the public repo is one commit WITHOUT design history. Code, tests,
+# fixtures, the scripts tests and CI need, READMEs, LICENSE, docs/DEV.md and the numbered plan/DELTA docs stay.
+# Raw run output, captured machine state and design-history pages go.
+
+# Raw transcripts of live spike runs (claude/codex/opencode/hermes): recorded on the owner's machine with his
+# accounts, CLI versions and network; evidence for the design decisions, not something the code needs.
+# The spike scripts recreate these folders when run (outputs are gitignored).
+spike/**/logs/**
+
+# Verdict tables the spike scripts write (`results.json` per leg, `results.after-*.json`): run output.
+spike/**/results*.json
+
+# Spike verdict summary for the design pages: design history, every row points into the raw logs above.
+spike/RESULTS.md
+
+# Recorded multi-agent workflow runs (legs + reviewers, model turns, verdicts) behind DELTA v0.4 / v0.5:
+# design history of the same nature as the results tables.
+spike/workflow-result.json
+spike/*/workflow-result*.json
+
+# spike/env: stdout/stderr captured from one run of each env probe on the owner's machine (`<probe>.log.jsonl`,
+# `<probe>.err.txt`). capture-env.log.jsonl is a dump of his login-shell environment; the rest record his PATH,
+# installed CLIs and service state. The probes themselves stay.
+spike/env/*.log.jsonl
+spike/env/*.err.txt
+
+# Research and critique runs with reviewer verdicts (design history).
+docs/research/**
+
+# Design pages v0.5 / v0.6 (design history) and the helper that renders their inline SVGs to PNG.
+docs/page-v0.5.html
+docs/page-v0.6.html
+docs/render.py

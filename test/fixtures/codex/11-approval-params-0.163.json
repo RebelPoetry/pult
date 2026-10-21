@@ -1,0 +1,62 @@
+{
+  "note": "живой codex-cli 0.163.0-alpha.10.2, 19.10.2026 (ревью M8d): params запросов разрешения как пришли; cwd — заглушка временной папки",
+  "command": {
+    "method": "item/commandExecution/requestApproval",
+    "id": 0,
+    "params": {
+      "kind": "command",
+      "threadId": "01a155cb-3c90-7062-b203-0283cee9c9aa",
+      "turnId": "01a155cb-3dc7-79c3-83b7-962600bf4313",
+      "itemId": "exec-98f57d17-94b1-4391-badf-45a2ad5d4bb6",
+      "startedAtMs": 1792440752501,
+      "environmentId": "local",
+      "reason": "Allow this curl command to access the network outside the sandbox?",
+      "command": "/bin/zsh -lc 'curl -sS -o /dev/null -w \"%{http_code}\" https://example.com'",
+      "cwd": "/var/folders/xy/0000000000000000000000000000gn/T/pult-review-rWjDlt",
+      "commandActions": [
+        {
+          "type": "unknown",
+          "command": "curl -sS -o /dev/null -w \"%{http_code}\" https://example.com"
+        }
+      ],
+      "proposedExecpolicyAmendment": [
+        "curl",
+        "-sS",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "https://example.com"
+      ],
+      "availableDecisions": [
+        "accept",
+        {
+          "acceptWithExecpolicyAmendment": {
+            "execpolicy_amendment": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "-w",
+              "%{http_code}",
+              "https://example.com"
+            ]
+          }
+        },
+        "cancel"
+      ]
+    }
+  },
+  "fileChange": {
+    "method": "item/fileChange/requestApproval",
+    "id": 0,
+    "params": {
+      "threadId": "01a155cb-8ba4-7e40-bde4-fe6c3d770c29",
+      "turnId": "01a155cb-8c32-7322-8051-d8214f99b189",
+      "itemId": "exec-3064896f-f094-4169-aac3-787f30fcf6e5",
+      "startedAtMs": 1792440774779,
+      "reason": null,
+      "grantRoot": null
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "pult-dummy",
+  "version": "0.0.1",
+  "description": "S9e dummy package for the Pult spike",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": { "pult-dummy": "bin/pult-dummy.mjs", "pultd-dummy": "bin/pultd-stub.mjs" },
+  "files": ["bin"],
+  "engines": { "node": ">=22" }
+}

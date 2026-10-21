@@ -1,0 +1,31 @@
+[Unit]
+Description=Pult daemon (pultd)
+Documentation=https://github.com/pawellazarew/pult
+After=default.target
+# Since systemd v229 these two live in [Unit], NOT [Service]; in [Service] they
+# are legacy and produce "Unknown key name" / deprecation warnings.
+# Five starts in 60 s and systemd gives up — that is what `pult doctor` reports
+# as "daemon is in a crash loop".
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Same launcher as macOS: it re-resolves node when nvm/fnm/volta/brew move it.
+ExecStart=%h/.pult/bin/pultd-launch
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.pult/logs/pultd.log
+StandardError=append:%h/.pult/logs/pultd.log
+Environment=PULT_HOME=%h/.pult
+# systemd --user inherits almost nothing; same gap as launchd on macOS.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target
+
+# Install:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pultd.service
+#   loginctl enable-linger "$USER"   # else systemd --user kills the daemon on last logout

@@ -1,0 +1,128 @@
+#!/bin/sh
+# pult — команда `pult` без системного node. POSIX sh, без башизмов.
+#
+# ЗАЧЕМ: npm кладёт в `current/bin/pult` ссылку на `dist/cli/main.js` с `#!/usr/bin/env node` — команда
+# жила на том node, что первым в PATH, и без системного node >= 22 не работала вовсе. А свой node Пульта
+# (PULT_HOME/runtime, src/update/runtime.ts) уже лежит на диске: install.sh ставит его и на машину, где
+# node нет. Этот лаунчер выбирает node так же, как лаунчер службы pultd-launch, и запускает CLI
+# активной версии. `pult update` копирует его в PULT_HOME/bin/pult (как pultd-launch), а install.sh
+# кладёт симлинк <bin-dir>/pult -> PULT_HOME/bin/pult. Старый симлинк на current/bin/pult работает
+# по-прежнему — но на системном node.
+#
+# Порядок:
+#   1. свой node Пульта из PULT_HOME/runtime/active — исполняемый и собран под эту машину (имя каталога
+#      `node-v<версия>-<платформа>-<arch>`; запуском не проверяется, как в src/env/nodeBin.ts: первый
+#      запуск свежего node macOS проверяет до 30 с, а команда должна отвечать сразу);
+#   2. системный node >= 22: из PATH, затем PULT_HOME/node-path (кэш лаунчера службы), затем известные места;
+#   3. точка входа CLI активной версии: установленная (current/lib/node_modules/pult/…) или рабочая
+#      копия (`pult daemon install --dev`: current/dist/…), и exec.
+#
+# Код выхода 78 (EX_CONFIG) — нет node >= 22 или нет активной версии; иначе — код самого CLI.
+#
+# Переменные:
+#   PULT_HOME             не задан — каталог над bin/ этого лаунчера (симлинк <bin-dir>/pult раскрывается
+#                         на один уровень), если там PULT_HOME (есть current или versions/); иначе ~/.pult
+#   PULT_MIN_NODE         по умолчанию 22
+#   PULT_LAUNCH_DRY_RUN=1 напечатать выбранный node и точку входа вместо exec (для тестов)
+
+set -u
+
+# Пол PATH до первой внешней команды (урок S9d-9 из pultd-launch). Пустой PATH не превращается в `:…`:
+# пустой элемент — текущая папка.
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+# PULT_HOME не задан: `install.sh --home DIR` кладёт <bin-dir>/pult -> DIR/bin/pult, и человек не обязан
+# экспортировать PULT_HOME — дом берётся по месту самого лаунчера. Рабочая копия (service/pult в репозитории)
+# под это не попадает: над service/ нет current и versions/.
+if [ -z "${PULT_HOME:-}" ]; then
+  _self=$0
+  if [ -L "$_self" ]; then
+    _to=$(readlink "$_self" 2>/dev/null) || _to=''
+    case "$_to" in
+      '') ;;
+      /*) _self=$_to ;;
+      *) _self="$(dirname "$_self")/$_to" ;;
+    esac
+  fi
+  _home=$(cd "$(dirname "$_self")/.." 2>/dev/null && pwd) || _home=''
+  if [ -n "$_home" ] && { [ -e "$_home/current" ] || [ -d "$_home/versions" ]; }; then
+    PULT_HOME=$_home
+  else
+    PULT_HOME="$HOME/.pult"
+  fi
+  export PULT_HOME
+fi
+MIN="${PULT_MIN_NODE:-22}"
+
+say() { printf 'pult: %s\n' "$*" >&2; }
+
+# Первая строка файла без внешних команд (read — встроенная): лаунчер зовут на каждую команду.
+first_line() {
+  _l=''
+  [ -r "$1" ] || return 1
+  IFS= read -r _l < "$1" || [ -n "$_l" ] || return 1
+  printf '%s' "$_l"
+}
+
+node_ok() {
+  [ -n "$1" ] && [ -f "$1" ] && [ -x "$1" ] || return 1
+  _v=$(NODE_OPTIONS='' "$1" -v 2>/dev/null) || return 1
+  case "$_v" in v[0-9]*) ;; *) return 1 ;; esac
+  _v=${_v#v}
+  [ "${_v%%.*}" -ge "$MIN" ] 2>/dev/null
+}
+
+# ---- 1. свой node Пульта -----------------------------------------------------
+NODE=''
+OWN=false
+_own=$(first_line "$PULT_HOME/runtime/active") || _own=''
+if [ -n "$_own" ] && [ -f "$_own" ] && [ -x "$_own" ]; then
+  # Платформа — как в именах тарболов nodejs.org (src/update/runtime.ts → platformKey). На macOS — по
+  # железу, а не по процессу: шелл под Rosetta отвечает `uname -m` = x86_64 и на Apple Silicon, а node
+  # darwin-x64 на Apple Silicon идёт через Rosetta — оба годны; не годен только arm64 на Intel.
+  case "$(uname -s)" in
+    Darwin)
+      if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then _ok='darwin-arm64 darwin-x64'; else _ok='darwin-x64'; fi ;;
+    Linux)
+      case "$(uname -m)" in arm64|aarch64) _ok='linux-arm64' ;; x86_64|amd64) _ok='linux-x64' ;; *) _ok='' ;; esac ;;
+    *) _ok='' ;;
+  esac
+  for _k in $_ok; do
+    case "$_own" in
+      */node-v*-"$_k"/bin/node) NODE=$_own; OWN=true; break ;;
+    esac
+  done
+fi
+
+# ---- 2. системный node -------------------------------------------------------
+if [ -z "$NODE" ]; then
+  _path_node=$(command -v node 2>/dev/null) || _path_node=''
+  _saved=$(first_line "$PULT_HOME/node-path") || _saved=''
+  for c in "$_path_node" "$_saved" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    if node_ok "$c"; then NODE=$c; break; fi
+  done
+fi
+
+if [ -z "$NODE" ]; then
+  say "нет node >= $MIN: свой node Пульта не стоит ($PULT_HOME/runtime/active), системного тоже нет."
+  say '  переустанови Пульт — install.sh сам поставит свой node: sh install.sh --from <pult-x.y.z.tgz>'
+  say "  или поставь node >= $MIN: brew install node"
+  exit 78
+fi
+
+# ---- 3. точка входа ----------------------------------------------------------
+ENTRY="$PULT_HOME/current/lib/node_modules/pult/dist/cli/main.js"
+[ -f "$ENTRY" ] || ENTRY="$PULT_HOME/current/dist/cli/main.js"
+if [ ! -f "$ENTRY" ]; then
+  say "активной версии нет: $PULT_HOME/current не указывает на пакет pult."
+  say '  поставить: sh install.sh --from <pult-x.y.z.tgz>   (что есть на диске: ls '"$PULT_HOME"'/versions)'
+  exit 78
+fi
+
+if [ "${PULT_LAUNCH_DRY_RUN:-0}" = 1 ]; then
+  printf '{"node":"%s","own":%s,"entry":"%s"}\n' "$NODE" "$OWN" "$ENTRY"
+  exit 0
+fi
+
+exec "$NODE" "$ENTRY" "$@"

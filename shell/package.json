@@ -1,0 +1,80 @@
+{
+  "name": "pult-shell",
+  "version": "0.1.15",
+  "private": true,
+  "license": "MIT",
+  "description": "Pult desktop window: a thin Electron shell over the pultd daemon",
+  "homepage": "https://github.com/pawellazarew/pult#readme",
+  "type": "module",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/build.mjs --tests && node --test dist-test/unit/*.test.js",
+    "start": "node scripts/build.mjs && node scripts/start.mjs",
+    "e2e": "node scripts/build.mjs --tests && node --test --test-concurrency=1 dist-test/e2e/*.test.js",
+    "dist:mac": "node scripts/build.mjs && electron-builder --mac --dir --arm64 --publish never",
+    "check:app": "node scripts/check-app.mjs"
+  },
+  "devDependencies": {
+    "@electron/fuses": "^2.1.3",
+    "@types/node": "^22.20.4",
+    "electron": "44.4.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.63.0",
+    "typescript": "^5.9.3"
+  },
+  "build": {
+    "appId": "io.github.pawellazarew.pult",
+    "productName": "Pult",
+    "copyright": "Copyright (c) 2026 Pavel Lazarev",
+    "directories": {
+      "output": "out",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/main.js",
+      "dist/preload.cjs",
+      "build/trayTemplate.png",
+      "build/trayTemplate@2x.png",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "electronLanguages": [
+      "ru",
+      "en"
+    ],
+    "afterPack": "scripts/after-pack.cjs",
+    "protocols": [
+      {
+        "name": "Pult",
+        "schemes": [
+          "pult"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": null,
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "darkModeSupport": true
+    },
+    "electronDist": "node_modules/electron/dist"
+  }
+}

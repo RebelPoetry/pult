@@ -1,0 +1,68 @@
+gui/502/dev.pult.acc = {
+	active count = 0
+	path = /Users/user/Library/LaunchAgents/dev.pult.acc.plist
+	type = LaunchAgent
+	state = spawn scheduled
+
+	program = /tmp/pacc-WUyU/h/bin/pultd-launch
+	arguments = {
+		/tmp/pacc-WUyU/h/bin/pultd-launch
+	}
+
+	working directory = /Users/user
+
+	stdout path = /tmp/pacc-WUyU/h/logs/service.log
+	stderr path = /tmp/pacc-WUyU/h/logs/service.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.T7KjiKfuHb/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		PULT_SERVICE => 1
+		PULT_HOME => /tmp/pacc-WUyU/h
+		PATH => /opt/homebrew/Cellar/node/26.9.0/bin:/opt/homebrew/bin:/Users/user/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+		XPC_SERVICE_NAME => dev.pult.acc
+	}
+
+	domain = gui/502 [100017]
+	asid = 100017
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	last terminating signal = Killed: 9
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 237177
+		type = resource
+		state = active
+		active count = 1
+		name = dev.pult.acc
+	}
+
+	jetsam coalition = {
+		ID = 237178
+		type = jetsam
+		state = active
+		active count = 1
+		name = dev.pult.acc
+	}
+
+	spawn type = background (5)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+
+	properties = runatload | inferred program
+}

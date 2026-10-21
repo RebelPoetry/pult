@@ -1,0 +1,202 @@
+#!/bin/sh
+# pultd-launch — точка входа службы Пульта (launchd и systemd --user). POSIX sh, без башизмов.
+# Перенос spike/env/service/pultd-launch (проверка S9d) с правками вехи В4 (docs/08-PLAN-F1-M4.md §2–§3).
+#
+# ЗАЧЕМ ВООБЩЕ ЛАУНЧЕР, А НЕ `node` ПРЯМО В plist/юните: путь к node умирает, когда brew/nvm/volta
+# переезжают на новую версию, и служба тихо перестаёт подниматься. Лаунчер держит путь в файле
+# состояния, сам его чинит и переписывает.
+#
+# СВОЙ NODE ПУЛЬТА (0.2.18): `pult update` кладёт официальный node в PULT_HOME/runtime и пишет путь
+# к нему в PULT_HOME/runtime/active. Он идёт первым: brew его не трогает. Системный node — запасной
+# путь (14.10.2026 `brew upgrade node` удалил node живого демона, и macOS перестала пускать агентов
+# в ~/Desktop — src/update/runtime.ts).
+#
+# Порядок:
+#   1. обрезать logs/service.log, если он больше 5 МБ;
+#   2. свой node Пульта из PULT_HOME/runtime/active — годен, значит шаги 3–5 пропускаются;
+#   3. системный: путь к node из файла состояния PULT_HOME/node-path;
+#   4. мёртвый / не исполняемый / старше 22 — найти заново (логин-шелл, известные места);
+#   5. переписать файл состояния (только для системного node: указатель своего пишет pult update);
+#   6. найти точку входа демона и exec.
+#
+# Коды выхода: 78 (EX_CONFIG) — ошибка конфигурации: нет node >= 22 или нет точки входа. Это НЕ падение:
+# launchd всё равно перезапустит через ThrottleInterval, а `pult doctor` по коду 78 объяснит причину.
+#
+# Переменные:
+#   PULT_HOME      по умолчанию ~/.pult
+#   PULT_ENTRY     явная точка входа демона (перебивает поиск)
+#   PULT_MIN_NODE  по умолчанию 22
+#   PULT_DRY_RUN=1 напечатать найденные node и точку входа вместо exec
+
+set -u
+
+# Просьба остановиться, пока лаунчер ищет node, — чистая остановка, код 0 (B1 повторной приёмки В4,
+# 23.09.2026). Без trap sh умирал от SIGTERM сигналом: для launchd (`KeepAlive {SuccessfulExit: false}`)
+# это «неуспешный выход», и служба, которую просили остановить, поднималась снова через ThrottleInterval
+# — `pult daemon stop` видел её воскрешение 25 с подряд. `exec` ниже сбрасывает trap: дальше сигналы
+# ловит сам демон.
+trap 'exit 0' TERM INT HUP
+
+# Доказано случаем S9d-9 спайка: с битым унаследованным PATH скрипт остался без `date`/`head`/`cat`
+# («date: command not found»). Лаунчер обязан гарантировать себе пол ДО первой внешней команды.
+# Унаследованный PATH — только если он НЕ пуст: прежнее `${PATH:-}:/usr/bin…` при пустом PATH
+# давало `:/usr/bin…`, а пустой элемент PATH — это текущая папка, и `date`, `wc`, `mkdir`, `mv`
+# искались сначала в cwd (проверено: ./date из cwd исполнялся). Порядок прежний: свой PATH первым.
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+PULT_HOME="${PULT_HOME:-$HOME/.pult}"
+STATE="$PULT_HOME/node-path"
+RUNTIME_ACTIVE="$PULT_HOME/runtime/active"
+MIN="${PULT_MIN_NODE:-22}"
+SERVICE_LOG="$PULT_HOME/logs/service.log"
+LOG_LIMIT=5242880
+
+log() { printf '%s pultd-launch: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+# ---- 1. обрезка service.log ------------------------------------------------
+# launchd и systemd (append:) держат файл открытым с O_APPEND, поэтому обрезка до нуля безопасна:
+# следующая запись всё равно встанет в конец. Переименование НЕ годится — дескриптор службы
+# продолжил бы писать в переименованный файл, и новый service.log остался бы пустым.
+if [ -f "$SERVICE_LOG" ]; then
+  _size=$(wc -c < "$SERVICE_LOG" 2>/dev/null | tr -d ' ')
+  if [ -n "$_size" ] && [ "$_size" -gt "$LOG_LIMIT" ] 2>/dev/null; then
+    : > "$SERVICE_LOG" 2>/dev/null || true
+    log "service.log был $_size байт (> $LOG_LIMIT) — обрезан"
+  fi
+fi
+
+# мажорная версия node по пути $1; пусто/ошибка — это не годный node
+node_major() {
+  _n="$1"
+  [ -n "$_n" ] || return 1
+  [ -x "$_n" ] || return 1
+  _v=$("$_n" -v 2>/dev/null) || return 1
+  case "$_v" in v[0-9]*) ;; *) return 1 ;; esac
+  _v=${_v#v}
+  printf '%s' "${_v%%.*}"
+}
+
+node_ok() {
+  _m=$(node_major "$1") || return 1
+  [ -n "$_m" ] || return 1
+  [ "$_m" -ge "$MIN" ] 2>/dev/null || return 1
+  return 0
+}
+
+# ---- 2. свой node Пульта ---------------------------------------------------
+NODE=""
+OWN=""
+if [ -r "$RUNTIME_ACTIVE" ]; then
+  _own=$(head -n 1 "$RUNTIME_ACTIVE" 2>/dev/null)
+  if [ -n "$_own" ] && node_ok "$_own"; then
+    NODE="$_own"
+    OWN=1
+    log "свой node Пульта: $NODE ($("$NODE" -v))"
+  else
+    log "свой node Пульта негоден: ${_own:-пустой указатель $RUNTIME_ACTIVE} — беру системный (поставить заново: pult runtime install)"
+  fi
+fi
+
+# ---- 3. сохранённый путь к системному node ---------------------------------
+SAVED=""
+if [ -r "$STATE" ]; then
+  SAVED=$(head -n 1 "$STATE" 2>/dev/null)
+fi
+
+if [ -n "$NODE" ]; then
+  :
+elif [ -n "$SAVED" ] && node_ok "$SAVED"; then
+  NODE="$SAVED"
+  log "сохранённый node годен: $NODE ($("$NODE" -v))"
+else
+  if [ -z "$SAVED" ]; then
+    log "сохранённого пути к node нет"
+  elif [ ! -x "$SAVED" ]; then
+    log "сохранённый путь к node не исполняемый: $SAVED"
+  else
+    log "сохранённый node слишком старый или негодный: $SAVED ($("$SAVED" -v 2>/dev/null || echo '?')), нужен >= $MIN"
+  fi
+fi
+
+# ---- 4. поиск заново -------------------------------------------------------
+if [ -z "$NODE" ]; then
+  # 3a. логин-шелл: подхватывает шимы nvm/fnm/mise/asdf, которые живут только в rc-файлах
+  SH="${SHELL:-/bin/sh}"
+  CAND=$("$SH" -ilc 'command -v node 2>/dev/null' 2>/dev/null | head -n 1)
+  if [ -n "$CAND" ] && node_ok "$CAND"; then
+    NODE="$CAND"
+    log "найден через логин-шелл: $NODE"
+  fi
+fi
+
+if [ -z "$NODE" ]; then
+  # 3b. известные места, от частного к общему
+  for c in \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    "$HOME/.volta/bin/node" \
+    "$HOME/.local/state/fnm_multishells"/*/bin/node \
+    "$HOME/.fnm/aliases/default/bin/node" \
+    "$HOME/.nvm/versions/node"/*/bin/node \
+    "$HOME/.asdf/shims/node" \
+    "$HOME/.local/share/mise/installs/node"/*/bin/node \
+    "$HOME/.local/bin/node" \
+    /usr/bin/node
+  do
+    [ -e "$c" ] || continue
+    if node_ok "$c"; then NODE="$c"; log "найден по списку кандидатов: $NODE"; break; fi
+  done
+fi
+
+# 3c. nvm держит в ~/.nvm/alias/default голую строку версии
+if [ -z "$NODE" ] && [ -r "$HOME/.nvm/alias/default" ]; then
+  _alias=$(head -n 1 "$HOME/.nvm/alias/default" 2>/dev/null)
+  _c="$HOME/.nvm/versions/node/v${_alias#v}/bin/node"
+  if node_ok "$_c"; then NODE="$_c"; log "найден по алиасу nvm default: $NODE"; fi
+fi
+
+if [ -z "$NODE" ]; then
+  log "ОШИБКА КОНФИГУРАЦИИ: нет node >= $MIN. Поставь (brew install node) и запусти: pult doctor"
+  exit 78
+fi
+
+# ---- 5. переписать файл состояния -----------------------------------------
+# node-path — кэш СИСТЕМНОГО node: свой node Пульта туда не пишется, иначе при негодном указателе
+# лаунчер «нашёл» бы его снова по node-path вместо системного.
+if [ -z "$OWN" ] && [ "$NODE" != "$SAVED" ]; then
+  mkdir -p "$PULT_HOME" 2>/dev/null || true
+  _tmp="$STATE.$$"
+  if printf '%s\n' "$NODE" > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$STATE" 2>/dev/null; then
+    log "файл состояния переписан: $STATE -> $NODE"
+  else
+    rm -f "$_tmp" 2>/dev/null || true
+    log "ВНИМАНИЕ: не удалось переписать $STATE"
+  fi
+fi
+
+# ---- 6. точка входа --------------------------------------------------------
+# Порядок из docs/08 §2: явный PULT_ENTRY → установленная версия (npm --global --prefix кладёт пакет
+# в lib/node_modules/pult) → рабочая копия (`pult daemon install --dev` делает current симлинком на
+# корень пакета). Так `pult update`, переключив current, меняет код службы без перезаписи plist/юнита.
+# Явный PULT_ENTRY, которого нет, — ошибка, а НЕ повод молча взять другую точку входа.
+if [ -n "${PULT_ENTRY:-}" ]; then
+  ENTRY="$PULT_ENTRY"
+elif [ -f "$PULT_HOME/current/lib/node_modules/pult/dist/daemon/main.js" ]; then
+  ENTRY="$PULT_HOME/current/lib/node_modules/pult/dist/daemon/main.js"
+else
+  ENTRY="$PULT_HOME/current/dist/daemon/main.js"
+fi
+
+if [ ! -f "$ENTRY" ]; then
+  log "ОШИБКА КОНФИГУРАЦИИ: нет точки входа демона: $ENTRY (активной версии нет? pult update --list)"
+  exit 78
+fi
+
+if [ "${PULT_DRY_RUN:-0}" = "1" ]; then
+  printf '{"node":"%s","nodeVersion":"%s","own":%s,"entry":"%s"}\n' "$NODE" "$("$NODE" -v)" "$([ -n "$OWN" ] && echo true || echo false)" "$ENTRY"
+  exit 0
+fi
+
+log "exec $NODE $ENTRY"
+exec "$NODE" "$ENTRY" "$@"

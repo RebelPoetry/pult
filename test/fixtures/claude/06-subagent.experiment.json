@@ -1,0 +1,49 @@
+{
+  "lines_after_first_result": 15,
+  "kinds_after_first_result": [
+    "system/init",
+    "system/status",
+    "stream_event",
+    "stream_event",
+    "stream_event",
+    "stream_event",
+    "assistant",
+    "stream_event",
+    "stream_event",
+    "stream_event",
+    "assistant",
+    "stream_event",
+    "stream_event",
+    "stream_event",
+    "result/success"
+  ],
+  "waited_ms": 90257,
+  "child_alive_at_deadline": true,
+  "child_exit_code": null,
+  "subagent_stats": {
+    "spawned": 1,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 1
+    },
+    "started_in_background": 1,
+    "max_depth": 1,
+    "spawned_by_subagents": 0,
+    "completed": 1,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {
+      "Explore": 1
+    }
+  }
+}
