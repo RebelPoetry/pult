@@ -1,12 +1,15 @@
 // Клиент сокета демона: рукопожатие, сопоставление запросов и ответов, поток подписки.
 
+import { readFileSync } from 'node:fs'
 import net from 'node:net'
+import path from 'node:path'
 import type { PultEvent } from '../core/events.js'
 import { createLineSplitter, encodeLine, MAX_LINE_BYTES, NdjsonError } from '../core/ndjson.js'
 import type { PultPaths } from '../core/paths.js'
 import type { ClientKind, RpcError } from '../core/rpc.js'
 import { PROTOCOL_VERSION } from '../core/rpc.js'
 import { readToken } from '../core/token.js'
+import { isBinaryPlist, plistString } from '../update/plist.js'
 
 export class ClientError extends Error {
   readonly code: string
@@ -44,6 +47,40 @@ export interface ConnectOptions {
   client?: ClientKind
   timeoutMs?: number
 }
+
+/**
+ * Чем запущено окно (0.3.4) — для hello оболочки: путь к исполняемому файлу Electron и версия Pult.app из его
+ * Info.plist. По ним демон после замены окна видит, что поднялась НОВАЯ версия (src/update/appUpdate.ts). Код этот
+ * исполняется в main оболочки (она грузит cli/client.js из пакета), поэтому работает и в окне 0.1.15 — новая
+ * оболочка не нужна. Не Electron — null; не из бандла (рабочая копия) — только путь.
+ */
+export function shellAppInfo(
+  execPath: string = process.execPath,
+  versions: Record<string, string | undefined> = process.versions,
+  read: (file: string) => string = (f) => readFileSync(f, 'utf8'),
+): { execPath: string; version?: string } | null {
+  if (!versions['electron']) return null
+  const m = /^(.+\.app)\/Contents\/MacOS\/[^/]+$/.exec(execPath)
+  if (!m) return { execPath }
+  try {
+    const text = read(path.join(m[1] as string, 'Contents', 'Info.plist'))
+    const v = isBinaryPlist(text) ? null : plistString(text, 'CFBundleShortVersionString')
+    return v ? { execPath, version: v } : { execPath }
+  } catch {
+    return { execPath }
+  }
+}
+
+/**
+ * Окно запоминается при загрузке модуля (в main оболочки — при её старте): переподключения после рестарта демона
+ * шлют то же самое, а Info.plist, который обновление окна уже заменило под работающим процессом, не перечитывается.
+ * `pid` — свой: по нему демон сверяет, что поднялся процесс из нового бандла.
+ */
+const SHELL_APP: ({ execPath: string; version?: string; pid: number }) | null = (() => {
+  const info = shellAppInfo()
+  return info ? { ...info, pid: process.pid } : null
+})()
+const shellApp = (): typeof SHELL_APP => SHELL_APP
 
 export async function connectClient(paths: PultPaths, opts: ConnectOptions = {}): Promise<Client> {
   const timeoutMs = opts.timeoutMs ?? 10_000
@@ -152,7 +189,9 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
       clearTimeout(timer)
       reject(new ClientError('connection_closed', 'демон закрыл соединение на рукопожатии'))
     })
-    socket.write(encodeLine({ type: 'hello', token, client: opts.client ?? 'cli', protocol: PROTOCOL_VERSION }))
+    const client = opts.client ?? 'cli'
+    const app = client === 'shell' ? shellApp() : null
+    socket.write(encodeLine({ type: 'hello', token, client, protocol: PROTOCOL_VERSION, ...(app ? { app } : {}) }))
   })
 
   const send = (
